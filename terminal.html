@@ -1,0 +1,667 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Web Terminal — Single File</title>
+  <style>
+    :root{
+      --bg:#040404;
+      --panel:#001100;
+      --text:#A8FF9E;
+      --muted:#6b8a6b;
+      --accent:#76c7ff;
+      --prompt:#7fffd4;
+      --cursor:#A8FF9E;
+      --shadow: 0 6px 30px rgba(0,0,0,0.7);
+    }
+    html,body{height:100%;margin:0;background:linear-gradient(180deg,#001000 0%, #000000 100%);}
+    body{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Roboto Mono", "Courier New", monospace;
+      color:var(--text); display:flex; align-items:center; justify-content:center;}
+    .wrap{width:min(1100px,96%); height:min(760px,92vh); background:linear-gradient(180deg, rgba(0,0,0,0.55), rgba(0,0,0,0.25)); border-radius:10px; padding:18px; box-shadow:var(--shadow); display:flex; flex-direction:column; gap:12px; }
+    header{display:flex;align-items:center;gap:12px}
+    .dots{display:flex;gap:8px}
+    .dot{width:12px;height:12px;border-radius:50%}
+    .dot.red{background:#ff5f56}
+    .dot.yellow{background:#ffbd2e}
+    .dot.green{background:#27c93f}
+    .title{color:var(--muted); font-size:0.95rem}
+    .screen{flex:1;background:linear-gradient(180deg,#001800,#001100); border-radius:8px; padding:14px; overflow:auto; box-shadow:inset 0 1px 0 rgba(255,255,255,0.02);}
+    .lines{white-space:pre-wrap; line-height:1.4; font-size:15px; color:var(--text);}
+    .line{display:flex; gap:8px; align-items:flex-start; }
+    .prompt{color:var(--prompt); min-width:12ch; flex-shrink:0}
+    .output{color:var(--text); flex:1; word-break:break-word}
+    .muted{color:var(--muted)}
+    .inputline{display:flex; gap:8px; align-items:center}
+    #cmdline{background:transparent; border:0; outline:0; color:var(--text); font:inherit; width:100%; caret-color:var(--cursor)}
+    .caret{display:inline-block; width:9px; height:1.1em; background:var(--cursor); margin-left:3px; animation:blink 1s steps(1) infinite}
+    @keyframes blink{50%{opacity:0}}
+    .green{color:#8ef5aa}
+    .yellow{color:#ffd479}
+    .red{color:#ffb3b3}
+    .blue{color:var(--accent)}
+    .help-table{display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px}
+    .fs-meta{color:var(--muted); font-size:0.9rem}
+    footer{color:var(--muted); font-size:0.85rem; display:flex; justify-content:space-between; gap:12px; align-items:center}
+    .controls{display:flex; gap:8px}
+    button.small{background:transparent; color:var(--muted); border:1px solid rgba(255,255,255,0.03); padding:6px 10px; border-radius:6px; cursor:pointer}
+    button.small:hover{color:var(--text); border-color:rgba(255,255,255,0.06)}
+    @media (max-width:640px){ .prompt{min-width:0.1ch; } .title{display:none} }
+  </style>
+</head>
+<body>
+  <div class="wrap" role="application" aria-label="Web terminal">
+    <header>
+      <div class="dots" aria-hidden="true">
+        <div class="dot red"></div><div class="dot yellow"></div><div class="dot green"></div>
+      </div>
+      <div class="title">Web Terminal — Single File</div>
+      <div style="flex:1"></div>
+      <div class="fs-meta" id="fs-meta"></div>
+    </header>
+
+    <main class="screen" id="screen" tabindex="0">
+      <div class="lines" id="lines" aria-live="polite" aria-atomic="false"></div>
+    </main>
+
+    <footer>
+      <div class="controls">
+        <button class="small" id="clearBtn" title="clear">Clear</button>
+        <button class="small" id="helpBtn" title="help">Help</button>
+        <button class="small" id="downloadState" title="Download filesystem">Download FS</button>
+      </div>
+      <div class="muted">Click anywhere to focus · Type commands · Press Tab to autocomplete · ↑/↓ for history</div>
+    </footer>
+  </div>
+
+  <!-- Single hidden input used for capturing typed characters -->
+  <input id="cmdline" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="position:fixed; left:-9999px; top:-9999px" />
+
+  <script>
+  (function(){
+    // Simple single-file web terminal emulator
+    const screen = document.getElementById('screen');
+    const linesEl = document.getElementById('lines');
+    const cmdinput = document.getElementById('cmdline');
+    const clearBtn = document.getElementById('clearBtn');
+    const helpBtn = document.getElementById('helpBtn');
+    const downloadBtn = document.getElementById('downloadState');
+    const fsMeta = document.getElementById('fs-meta');
+
+    // Persistent storage keys
+    const STORAGE_KEY = 'webterm_v1_fs';
+    const HISTORY_KEY = 'webterm_v1_history';
+
+    // Simple in-memory filesystem (tree)
+    let fs = null;
+    let cwd = '/home/guest';
+    let username = 'guest';
+    let hostname = 'web';
+    let history = [];
+    let histIndex = -1;
+
+    // Built-in commands list (names)
+    const COMMANDS = ['help','ls','pwd','cd','cat','echo','clear','date','whoami','mkdir','touch','rm','history','download','upload','open','sleep','whoami','about'];
+
+    // Initialize
+    function init(){
+      loadState();
+      renderPromptLine();
+      printWelcome();
+      updateFsMeta();
+      focusInput();
+      attachEvents();
+    }
+
+    // Load from localStorage or create default
+    function loadState(){
+      try{
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if(raw){
+          const parsed = JSON.parse(raw);
+          fs = parsed.fs || defaultFs();
+          cwd = parsed.cwd || '/home/guest';
+          username = parsed.username || 'guest';
+        } else {
+          fs = defaultFs();
+        }
+      } catch(e){
+        console.warn('Failed to load FS, using default', e);
+        fs = defaultFs();
+      }
+      try{
+        history = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+      } catch(e){ history = []; }
+    }
+
+    function saveState(){
+      try{
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({fs,cwd,username}));
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+      } catch(e){ console.warn('save failed', e); }
+      updateFsMeta();
+    }
+
+    function defaultFs(){
+      return {
+        '/': { type:'dir', mtime:Date.now(), children: {
+          'home': { type:'dir', mtime:Date.now(), children:{
+            'guest': { type:'dir', mtime:Date.now(), children:{
+              'readme.txt': { type:'file', mtime:Date.now(), content: "Welcome to your Web Terminal!\nType 'help' to see available commands.\nThis filesystem is stored in your browser's localStorage." }
+            } }
+          } },
+          'etc': { type:'dir', mtime:Date.now(), children:{} },
+          'var': { type:'dir', mtime:Date.now(), children:{} },
+        } }
+      };
+    }
+
+    // Utilities: path resolver
+    function resolvePath(path){
+      if(!path) return cwd;
+      if(path[0]==='/') {
+        var parts = path.split('/').filter(Boolean);
+      } else {
+        var parts = cwd.split('/').filter(Boolean).concat(path.split('/').filter(Boolean));
+      }
+      const stack = [];
+      for(const p of parts){
+        if(p==('.')||p==='') continue;
+        if(p==='..'){ if(stack.length) stack.pop(); continue; }
+        stack.push(p);
+      }
+      return '/' + stack.join('/');
+    }
+
+    function walk(path){
+      // returns {node, parentNode, name}
+      path = resolvePath(path);
+      const parts = path.split('/').filter(Boolean);
+      let node = fs['/'];
+      let parent = null;
+      for(const p of parts){
+        if(node.type !== 'dir') return null;
+        if(!node.children[p]) return null;
+        parent = node;
+        node = node.children[p];
+      }
+      return {node, parent, name: parts[parts.length-1]||'/' , path};
+    }
+
+    function ensureDir(path){
+      // create intermediate dirs
+      const target = resolvePath(path);
+      const parts = target.split('/').filter(Boolean);
+      let node = fs['/'];
+      for(const p of parts){
+        if(!node.children[p]){
+          node.children[p] = {type:'dir', mtime:Date.now(), children:{}};
+        } else if(node.children[p].type !== 'dir') {
+          throw new Error(p + ' is not a directory');
+        }
+        node = node.children[p];
+      }
+      saveState();
+      return node;
+    }
+
+    function listDir(path){
+      const w = walk(path);
+      if(!w) throw new Error('No such directory');
+      if(w.node.type !== 'dir') throw new Error('Not a directory');
+      return Object.entries(w.node.children).map(([name,item])=>{
+        return {name, type:item.type, mtime:item.mtime, size: item.type==='file' ? (item.content||'').length : Object.keys(item.children||{}).length};
+      }).sort((a,b)=>a.name.localeCompare(b.name));
+    }
+
+    // UI helpers
+    function printLine(text='', cls='output'){
+      const div = document.createElement('div');
+      div.className = 'line';
+      const promptSpan = document.createElement('span');
+      promptSpan.className = 'prompt muted';
+      promptSpan.textContent = ''; // empty for output lines
+      const outSpan = document.createElement('div');
+      outSpan.className = cls;
+      outSpan.innerText = text;
+      div.appendChild(promptSpan);
+      div.appendChild(outSpan);
+      linesEl.appendChild(div);
+      scrollBottom();
+    }
+
+    function printBlock(lines, cls='output'){
+      if(lines === undefined || lines === null) return;
+      if(typeof lines === 'string') lines = lines.split('\n');
+      lines.forEach(line => printLine(line, cls));
+    }
+
+    function renderPromptLine(){
+      // remove existing active prompt if any
+      const existing = document.querySelector('.inputline');
+      if(existing) existing.remove();
+
+      const div = document.createElement('div');
+      div.className = 'line inputline';
+      const promptSpan = document.createElement('span');
+      promptSpan.className = 'prompt';
+      promptSpan.textContent = `${username}@${hostname}:${cwd === '/home/guest' ? '~' : cwd.replace(/^\\/,'')}$`;
+      const inputWrap = document.createElement('div');
+      inputWrap.style.flex='1';
+      inputWrap.style.display='flex';
+      inputWrap.style.alignItems='center';
+      const inputEl = document.createElement('span');
+      inputEl.id = 'visibleInput';
+      inputEl.contentEditable = true;
+      inputEl.spellcheck = false;
+      inputEl.style.outline = 'none';
+      inputEl.style.whiteSpace = 'pre';
+      inputEl.style.minHeight = '1.2em';
+      inputEl.style.width = '100%';
+      inputEl.style.color = 'inherit';
+      inputEl.style.display = 'inline-block';
+      inputEl.addEventListener('paste', onPaste);
+      inputEl.addEventListener('keydown', onKeyDown);
+      inputEl.addEventListener('input', onInput);
+      inputWrap.appendChild(inputEl);
+      const caret = document.createElement('span');
+      caret.className = 'caret';
+      inputWrap.appendChild(caret);
+      div.appendChild(promptSpan);
+      div.appendChild(inputWrap);
+      linesEl.appendChild(div);
+      scrollBottom();
+      // focus
+      setTimeout(()=>{ inputEl.focus(); placeCaretAtEnd(inputEl); }, 20);
+    }
+
+    function placeCaretAtEnd(el){
+      const range = document.createRange();
+      const sel = window.getSelection();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+
+    function scrollBottom(){ screen.scrollTop = screen.scrollHeight; }
+
+    // Input events
+    function focusInput(){
+      // focus the visible contenteditable input
+      const v = document.getElementById('visibleInput');
+      if(v) v.focus();
+    }
+
+    function attachEvents(){
+      screen.addEventListener('click', ()=> { focusInput(); });
+      clearBtn.addEventListener('click', ()=> { linesEl.innerHTML=''; renderPromptLine(); });
+      helpBtn.addEventListener('click', ()=> { runCommand('help'); });
+      downloadBtn.addEventListener('click', ()=> { downloadState(); });
+
+      // Global keybindings for accessibility: '/' to focus and start typing
+      window.addEventListener('keydown', (e)=>{
+        if(e.key === '/' && (document.activeElement||{}).tagName !== 'INPUT' && (document.activeElement||{}).id !== 'visibleInput'){
+          e.preventDefault();
+          focusInput();
+        }
+      });
+    }
+
+    function onPaste(e){
+      e.preventDefault();
+      const text = (e.clipboardData || window.clipboardData).getData('text');
+      document.execCommand('insertText', false, text);
+    }
+
+    function onInput(e){
+      // no special handling for now
+    }
+
+    function onKeyDown(e){
+      const el = e.currentTarget;
+      if(e.key === 'Enter'){
+        e.preventDefault();
+        const raw = el.innerText.replace(/\u00A0/g,' ').trim();
+        // Echo command as static line and run it
+        echoCommand(raw);
+        el.removeEventListener('keydown', onKeyDown);
+        el.contentEditable = false;
+        runCommand(raw);
+        return;
+      } else if(e.key === 'Tab'){
+        e.preventDefault();
+        const raw = el.innerText.replace(/\u00A0/g,' ');
+        doAutocomplete(raw);
+        return;
+      } else if(e.key === 'ArrowUp'){
+        e.preventDefault();
+        if(history.length===0) return;
+        histIndex = Math.min(history.length-1, (histIndex===-1? history.length : histIndex) + 1);
+        const cmd = history[history.length-1-histIndex] || '';
+        el.innerText = cmd;
+        placeCaretAtEnd(el);
+        return;
+      } else if(e.key === 'ArrowDown'){
+        e.preventDefault();
+        if(history.length===0) return;
+        histIndex = Math.max(-1, histIndex-1);
+        const cmd = histIndex===-1 ? '' : history[history.length-1-histIndex] || '';
+        el.innerText = cmd;
+        placeCaretAtEnd(el);
+        return;
+      } else if(e.key === 'c' && (e.ctrlKey || e.metaKey)){
+        // copy: let default behavior
+        return;
+      }
+      // reset histIndex on other keys
+      histIndex = -1;
+    }
+
+    function echoCommand(cmd){
+      const container = document.createElement('div');
+      container.className = 'line';
+      const promptSpan = document.createElement('span');
+      promptSpan.className = 'prompt';
+      promptSpan.textContent = `${username}@${hostname}:${cwd === '/home/guest' ? '~' : cwd}$`;
+      const outSpan = document.createElement('div');
+      outSpan.className = 'output';
+      outSpan.innerText = cmd;
+      container.appendChild(promptSpan);
+      container.appendChild(outSpan);
+      // replace the active input line with this static line
+      const active = document.querySelector('.inputline');
+      if(active) active.replaceWith(container);
+      scrollBottom();
+    }
+
+    // Autocomplete: commands and filenames in CWD
+    function doAutocomplete(raw){
+      const parts = raw.split(/\s+/);
+      const cur = parts[parts.length-1] || '';
+      const prefix = cur;
+      let candidates = [];
+      if(parts.length===1){
+        candidates = COMMANDS.concat(listCwdEntries()).filter((v,i,arr)=>v.startsWith(prefix));
+      } else {
+        const files = listCwdEntries();
+        candidates = files.filter(f=>f.startsWith(prefix));
+      }
+      if(candidates.length===0) return;
+      if(candidates.length===1){
+        // insert completion
+        const v = document.getElementById('visibleInput');
+        parts[parts.length-1] = candidates[0];
+        v.innerText = parts.join(' ') + (raw.endsWith(' ') ? ' ' : '');
+        placeCaretAtEnd(v);
+      } else {
+        printBlock(candidates.join('  '), 'muted');
+        renderPromptLine();
+      }
+    }
+
+    function listCwdEntries(){
+      try{
+        const items = listDir(cwd);
+        return items.map(i => i.type==='dir' ? i.name+'/' : i.name);
+      } catch(e){ return []; }
+    }
+
+    // Command runner
+    async function runCommand(raw){
+      if(!raw) { renderPromptLine(); return; }
+      history.push(raw);
+      saveState();
+      const parts = raw.split(/\s+/).filter(Boolean);
+      const cmd = parts[0];
+      const args = parts.slice(1);
+      switch(cmd){
+        case 'help': cmd_help(args); break;
+        case 'ls': cmd_ls(args); break;
+        case 'pwd': cmd_pwd(args); break;
+        case 'cd': cmd_cd(args); break;
+        case 'cat': cmd_cat(args); break;
+        case 'echo': cmd_echo(args); break;
+        case 'clear': linesEl.innerHTML=''; break;
+        case 'date': cmd_date(args); break;
+        case 'whoami': printLine(username); break;
+        case 'mkdir': cmd_mkdir(args); break;
+        case 'touch': cmd_touch(args); break;
+        case 'rm': cmd_rm(args); break;
+        case 'history': cmd_history(args); break;
+        case 'download': cmd_download(args); break;
+        case 'upload': await cmd_upload(args); break;
+        case 'open': cmd_open(args); break;
+        case 'sleep': await cmd_sleep(args); break;
+        case 'about': cmd_about(); break;
+        default:
+          if(cmd.trim()==='') { /* ignore */ }
+          else printLine(`${cmd}: command not found`, 'red');
+      }
+      renderPromptLine();
+    }
+
+    // Commands implementations
+    function cmd_help(){
+      printLine('Available commands:', 'green');
+      const groups = [
+        ['help','about','clear','history'],
+        ['ls','pwd','cd','cat','echo','date','whoami'],
+        ['mkdir','touch','rm','download','upload','open','sleep']
+      ];
+      groups.flat().forEach(c => printLine('  '+c, 'muted'));
+      printLine("");
+      printLine("Tips: Use Tab to autocomplete file/command names. ↑/↓ to browse history.", 'muted');
+    }
+
+    function cmd_ls(args){
+      const path = args[0] || '.';
+      try{
+        const items = listDir(path);
+        const cols = items.map(it => {
+          const suf = it.type==='dir' ? '/' : '';
+          const name = it.name + suf;
+          return name.padEnd(26,' ');
+        });
+        // print in columns
+        for(let i=0;i<cols.length;i+=3){
+          printLine(cols.slice(i,i+3).join(''));
+        }
+      } catch(e){
+        printLine('ls: ' + e.message, 'red');
+      }
+    }
+
+    function cmd_pwd(){ printLine(cwd); }
+
+    function cmd_cd(args){
+      const target = args[0] || '/home/guest';
+      const resolved = resolvePath(target);
+      const w = walk(resolved);
+      if(!w){
+        printLine('cd: no such file or directory: ' + target, 'red'); return;
+      }
+      if(w.node.type !== 'dir'){ printLine('cd: not a directory: ' + target, 'red'); return; }
+      cwd = resolved;
+      saveState();
+    }
+
+    function cmd_cat(args){
+      if(args.length===0){ printLine('Usage: cat <file>'); return; }
+      const target = args[0];
+      const w = walk(target);
+      if(!w){ printLine('cat: no such file: ' + target, 'red'); return; }
+      if(w.node.type !== 'file'){ printLine('cat: is a directory: ' + target, 'red'); return; }
+      printBlock(w.node.content||'');
+    }
+
+    function cmd_echo(args){
+      // support echo "a b" > file
+      const raw = args.join(' ');
+      const match = raw.match(/^(.*)\s*>\s*(.+)$/);
+      if(match){
+        const text = stripQuotes(match[1].trim());
+        const filename = match[2].trim();
+        writeFile(filename, text);
+        printLine('');
+      } else {
+        printLine(stripQuotes(raw));
+      }
+    }
+
+    function stripQuotes(s){ if(!s) return s; if((s.startsWith('"')&&s.endsWith('"'))||(s.startsWith("'")&&s.endsWith("'"))) return s.slice(1,-1); return s; }
+
+    function writeFile(path, content){
+      const full = resolvePath(path);
+      const parentPath = full.split('/').slice(0,-1).join('/') || '/';
+      const name = full.split('/').pop();
+      const pw = walk(parentPath);
+      if(!pw){ printLine('No such directory: ' + parentPath, 'red'); return; }
+      pw.node.children[name] = { type:'file', mtime:Date.now(), content: content };
+      saveState();
+    }
+
+    function cmd_date(){
+      printLine((new Date()).toString());
+    }
+
+    function cmd_mkdir(args){
+      if(args.length===0){ printLine('mkdir: missing operand'); return; }
+      try{
+        ensureDir(resolvePath(args[0]));
+        printLine('');
+      } catch(e){ printLine('mkdir: ' + e.message, 'red'); }
+    }
+
+    function cmd_touch(args){
+      if(args.length===0){ printLine('touch: missing file operand'); return; }
+      const path = resolvePath(args[0]);
+      const parent = path.split('/').slice(0,-1).join('/') || '/';
+      const name = path.split('/').pop();
+      const pw = walk(parent);
+      if(!pw) { printLine('touch: no such file or directory: ' + parent, 'red'); return; }
+      pw.node.children[name] = pw.node.children[name] || {type:'file', mtime:Date.now(), content: ''};
+      pw.node.children[name].mtime = Date.now();
+      saveState();
+    }
+
+    function cmd_rm(args){
+      if(args.length===0){ printLine('rm: missing operand'); return; }
+      const target = resolvePath(args[0]);
+      if(target==='/' ){ printLine('rm: cannot remove root'); return; }
+      const parts = target.split('/').filter(Boolean);
+      const name = parts.pop();
+      const parentPath = '/' + parts.join('/');
+      const pw = walk(parentPath);
+      if(!pw){ printLine('rm: no such file or directory'); return; }
+      if(!pw.node.children[name]){ printLine('rm: no such file or directory: ' + args[0]); return; }
+      delete pw.node.children[name];
+      saveState();
+    }
+
+    function cmd_history(){
+      history.forEach((h,i)=> printLine(`${i+1}  ${h}`, 'muted'));
+    }
+
+    function cmd_download(args){
+      // download file from fs to user's device
+      if(args.length===0){ printLine('download: missing file operand'); return; }
+      const w = walk(args[0]);
+      if(!w){ printLine('download: no such file: ' + args[0], 'red'); return; }
+      if(w.node.type !== 'file'){ printLine('download: not a file', 'red'); return; }
+      const blob = new Blob([w.node.content||''], {type:'text/plain'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = w.name;
+      document.body.appendChild(a); a.click();
+      a.remove(); URL.revokeObjectURL(url);
+      printLine('Downloaded ' + w.name);
+    }
+
+    async function cmd_upload(){
+      // opens a file picker and writes the chosen file(s) into current folder
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.multiple = true;
+      return new Promise(resolve => {
+        input.onchange = async (e) => {
+          const files = Array.from(e.target.files || []);
+          for(const f of files){
+            const text = await f.text();
+            writeFile(cwd + '/' + f.name, text);
+            printLine('uploaded: ' + f.name);
+          }
+          resolve();
+        };
+        input.click();
+      });
+    }
+
+    function cmd_open(args){
+      if(args.length===0){ printLine('open: missing file'); return; }
+      const w = walk(args[0]);
+      if(!w){ printLine('open: no such file: ' + args[0], 'red'); return; }
+      if(w.node.type !== 'file'){ printLine('open: not a file', 'red'); return; }
+      // open in new tab as plain text
+      const blob = new Blob([w.node.content||''], {type:'text/plain'});
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank');
+      printLine('Opened ' + args[0] + ' in new tab');
+    }
+
+    function cmd_sleep(args){
+      const t = parseFloat(args[0] || '1') * 1000;
+      printLine('Sleeping for ' + (t/1000) + 's ...', 'muted');
+      return new Promise(resolve => setTimeout(resolve, t));
+    }
+
+    function cmd_about(){
+      printLine('This is a single-file web terminal emulator. Filesystem stored in localStorage.', 'muted');
+      printLine('You can create files with touch/echo, view with cat, download files, upload, etc.');
+    }
+
+    // Helpers
+    function downloadState(){
+      const blob = new Blob([JSON.stringify({fs,cwd,username},null,2)], {type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'webterminal-state.json';
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    }
+
+    // Small UI welcome
+    function printWelcome(){
+      printLine('Welcome to the Web Terminal!', 'green');
+      printLine('');
+      printLine("Type 'help' to see available commands.", 'muted');
+      printLine('');
+      // show readme if exists
+      try{
+        const w = walk('/home/guest/readme.txt');
+        if(w && w.node.type === 'file'){
+          printBlock(w.node.content, 'muted');
+          printLine('');
+        }
+      } catch(e){}
+    }
+
+    function updateFsMeta(){
+      // count files & size
+      const stats = {files:0, dirs:0, bytes:0};
+      (function rec(node){
+        if(node.type==='file'){ stats.files++; stats.bytes += (node.content||'').length; return; }
+        if(node.type==='dir'){ stats.dirs++; for(const k in node.children) rec(node.children[k]); }
+      })(fs['/']);
+      fsMeta.textContent = `${stats.files} files • ${stats.dirs} dirs • ${Math.round(stats.bytes/1024)} KB`;
+    }
+
+    // Start
+    init();
+
+    // Expose in window for debugging (optional)
+    window.webterm = { fs, saveState, loadState, walk, resolvePath };
+
+  })();
+  </script>
+</body>
+</html>
